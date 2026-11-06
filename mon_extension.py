@@ -30,6 +30,11 @@ from qgis.PyQt.QtWidgets import QAction
 from .mon_extension_dialog import MonExtensionDialog
 import os.path
 
+#mes imports
+from qgis.core import QgsProject, QgsMapLayerType, QgsWkbTypes, QgsCoordinateReferenceSystem, QgsCoordinateTransform, QgsProject
+from qgis.gui import QgsMapToolEmitPoint
+import requests
+
 
 class MonExtension:
     """QGIS Plugin Implementation."""
@@ -178,6 +183,53 @@ class MonExtension:
                 action)
             self.iface.removeToolBarIcon(action)
 
+    def activer_outil(self):
+        """Fonction déclenchée par le bouton pour activer l'outil sur la carte"""
+        self.canvas.setMapTool(self.pointTool)
+        self.dlg.hide() # Masque la fenêtre pour cliquer sur la carte
+
+    def displayPoint(self, point, button):
+        """Fonction déclenchée par le clic sur la carte"""
+        crs_origine = self.canvas.mapSettings().destinationCrs()
+        crs_destination = QgsCoordinateReferenceSystem("EPSG:4326")
+        
+        transform = QgsCoordinateTransform(crs_origine, crs_destination, QgsProject.instance())
+        point_wgs84 = transform.transform(point)
+        
+        lon = round(point_wgs84.x(), 5)
+        lat = round(point_wgs84.y(), 5)
+        
+        self.dlg.i_long.setText(str(lon))
+        self.dlg.i_lat.setText(str(lat))
+
+        url_ign = f"https://data.geopf.fr/geocodage/reverse?lat={lat}&lon={lon}&type=housenumber&limit=1"
+
+        try:
+            reponse = requests.get(url_ign)
+            data = reponse.json()
+            
+            if data.get("features"):
+                propriete = data["features"][0]["properties"]
+                numero = propriete.get("housenumber", "S/N")
+                rue = propriete.get("street", "")
+                code_insee = propriete.get("citycode", "")
+                commune = propriete.get("city", "")
+                
+
+                texte_adresse= f"{numero} {rue} {commune} {code_insee}"
+            else:
+                texte_adresse = "Aucune adresse postale trouvée à cet endroit."
+                
+        except requests.exceptions.RequestException as e:
+            texte_adresse = f"Erreur de connexion à l'API IGN : {str(e)}"
+            
+        self.dlg.i_adresse.setText(texte_adresse)
+        
+        
+        self.canvas.unsetMapTool(self.pointTool)
+        self.dlg.show()
+
+
 
     def run(self):
         """Run method that performs all the real work"""
@@ -188,12 +240,31 @@ class MonExtension:
             self.first_start = False
             self.dlg = MonExtensionDialog()
 
+
+        
+    
+        projet = QgsProject.instance()
+        couches = projet.mapLayers().values()
+        for couche in couches:
+            if couche.type() == QgsMapLayerType.VectorLayer:
+                if couche.geometryType() == QgsWkbTypes.PointGeometry:
+                    self.dlg.listd_cp.addItem(couche.name(), couche.id())
+
+
+        
+
+        self.canvas = self.iface.mapCanvas()
+        self.pointTool = QgsMapToolEmitPoint(self.canvas)
+        self.pointTool.canvasClicked.connect(self.displayPoint)
+        self.dlg.pb_action.clicked.connect(self.activer_outil)
+
         # show the dialog
         self.dlg.show()
         # Run the dialog event loop
         result = self.dlg.exec_()
         # See if OK was pressed
         if result:
-            # Do something useful here - delete the line containing pass and
-            # substitute with your code.
+
             pass
+
+
