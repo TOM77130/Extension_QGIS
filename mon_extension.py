@@ -31,9 +31,11 @@ from .mon_extension_dialog import MonExtensionDialog
 import os.path
 
 #mes imports
+from qgis.core import QgsGeometry, Qgis, QgsVectorLayer, QgsFeature, QgsProject, QgsGeometry
 from qgis.core import QgsProject, QgsMapLayerType, QgsWkbTypes, QgsCoordinateReferenceSystem, QgsCoordinateTransform, QgsProject
 from qgis.gui import QgsMapToolEmitPoint
 import requests
+from qgis.PyQt.QtGui import QColor
 
 
 class MonExtension:
@@ -184,27 +186,30 @@ class MonExtension:
             self.iface.removeToolBarIcon(action)
 
     def activer_outil(self):
-        """Fonction déclenchée par le bouton pour activer l'outil sur la carte"""
+        """Fonction activee par le bouton pour aller sur la carte"""
         self.canvas.setMapTool(self.pointTool)
-        self.dlg.hide() # Masque la fenêtre pour cliquer sur la carte
+        self.dlg.hide()
 
     def displayPoint(self, point, button):
-        """Fonction déclenchée par le clic sur la carte"""
-        crs_origine = self.canvas.mapSettings().destinationCrs()
+        """Fonction activee par le clic sur la carte"""
+
+        #recupere les crs projet et le crs pour le buffer et projette
+        crs_proj = self.canvas.mapSettings().destinationCrs()
         crs_destination = QgsCoordinateReferenceSystem("EPSG:4326")
-        
-        transform = QgsCoordinateTransform(crs_origine, crs_destination, QgsProject.instance())
+        transform = QgsCoordinateTransform(crs_proj, crs_destination, QgsProject.instance())
         point_wgs84 = transform.transform(point)
         
+        #recupere, arrondi et applique les coordonnees
         lon = round(point_wgs84.x(), 5)
         lat = round(point_wgs84.y(), 5)
-        
         self.dlg.i_long.setText(str(lon))
         self.dlg.i_lat.setText(str(lat))
 
+        #lien pour recup les adresses
         url_ign = f"https://data.geopf.fr/geocodage/reverse?lat={lat}&lon={lon}&type=housenumber&limit=1"
 
         try:
+            #fait la requete a partir de l'url et recupere le json
             reponse = requests.get(url_ign)
             data = reponse.json()
             
@@ -225,6 +230,79 @@ class MonExtension:
             
         self.dlg.i_adresse.setText(texte_adresse)
         
+        try:
+            #retir la couche temporaaire si elle existe
+            nom_couche_temp = "Buffer_TC"
+            couches_supp = QgsProject.instance().mapLayersByName(nom_couche_temp)
+            if couches_supp:
+                QgsProject.instance().removeMapLayer(couches_supp[0].id())
+
+
+            dist = int(self.dlg.i_dist.text())
+
+            #recupere le couche
+            nom_c = self.dlg.listd_cp.currentText()
+            couche = QgsProject.instance().mapLayersByName(nom_c)[0]
+
+
+
+
+            #créer le buffer dans le bon crs (si besoin de transformation)
+            crs_couche = couche.crs()
+            crs_L93 = QgsCoordinateReferenceSystem("EPSG:2154")
+            
+            geom_point = QgsGeometry.fromPointXY(point)
+            
+            if crs_proj != crs_L93:
+                transfo1 = QgsCoordinateTransform(crs_proj, crs_L93, QgsProject.instance())
+                geom_point.transform(transfo1)
+                
+            zone_tampon = geom_point.buffer(dist, 50)
+            zone_tampon_affichage = QgsGeometry(zone_tampon)
+            
+            if crs_couche != crs_L93:
+                transfo2 = QgsCoordinateTransform(crs_L93, crs_couche, QgsProject.instance())
+                zone_tampon.transform(transfo2)
+            
+
+
+            #calcul le nombre de point qui intersecte le buffer
+            c = 0
+            for objet in couche.getFeatures():
+                if objet.geometry().intersects(zone_tampon):
+                    c += 1
+            
+            #resultat
+            self.dlg.i_nb_obj.setText(str(c))
+
+            #creer la couche temporaire et visualise le buffer
+            couches_temp = QgsProject.instance().mapLayersByName(nom_couche_temp)
+            
+            couche_tampon = QgsVectorLayer("Polygon?crs=EPSG:2154", nom_couche_temp, "memory")
+            QgsProject.instance().addMapLayer(couche_tampon)
+            
+            #symbologie
+            symbole = couche_tampon.renderer().symbol()
+            symbole.setColor(QColor(0, 0, 0, 0))
+            symbole.symbolLayer(0).setStrokeColor(QColor("#000000"))
+                
+            prov = couche_tampon.dataProvider()
+            liste_ids_existants = [f.id() for f in couche_tampon.getFeatures()]
+            if liste_ids_existants:
+                prov.deleteFeatures(liste_ids_existants)
+            feat = QgsFeature()
+            feat.setGeometry(zone_tampon_affichage)
+            
+            prov.addFeatures([feat])
+            
+            couche_tampon.updateExtents()
+            self.canvas.refresh()
+
+        except:
+            self.iface.messageBar().pushMessage("Erreur pas de valeur ou pas entière", level=Qgis.Critical)
+            self.dlg.i_nb_obj.setText("No result")
+
+        
         
         self.canvas.unsetMapTool(self.pointTool)
         self.dlg.show()
@@ -242,7 +320,7 @@ class MonExtension:
 
 
         
-    
+        #recupere les couches et ajoute a la liste deroulante uniquement les raster points
         projet = QgsProject.instance()
         couches = projet.mapLayers().values()
         for couche in couches:
@@ -252,7 +330,7 @@ class MonExtension:
 
 
         
-
+        #lie les boutons aux evenements
         self.canvas = self.iface.mapCanvas()
         self.pointTool = QgsMapToolEmitPoint(self.canvas)
         self.pointTool.canvasClicked.connect(self.displayPoint)
